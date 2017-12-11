@@ -1,10 +1,14 @@
-from flask import Flask, render_template, request, abort, Response, make_response
-from scrapers import feedgen
-from pymongo import MongoClient
-from dicttoxml import dicttoxml
-from xml.dom.minidom import parseString
 import json
 import os
+from argparse import ArgumentParser
+from xml.dom.minidom import parseString
+
+from dicttoxml import dicttoxml
+from flask import (Flask, Response, abort, jsonify, make_response,
+                   render_template, request)
+from pymongo import MongoClient
+
+from scrapers import feedgen, scrapers
 
 app = Flask(__name__)
 err = ""
@@ -16,6 +20,11 @@ errorObj = {
     'status_code': 500,
     'error': 'Could not parse the page due to Internal Server Error'
 }
+
+parser = ArgumentParser()
+help_msg = "Start the server in development mode with debug=True"
+parser.add_argument("--dev", help=help_msg, action="store_true")
+args = parser.parse_args()
 
 
 @app.route('/')
@@ -32,17 +41,14 @@ def bad_request(err):
 @app.route('/api/v1/search/<search_engine>', methods=['GET'])
 def search(search_engine):
     try:
-        num = request.args.get('num') or 10
-        count = int(num)
-        qformat = request.args.get('format') or 'json'
+        count = int(request.args.get('num', 10))
+        qformat = request.args.get('format', 'json').lower()
         if qformat not in ('json', 'xml'):
             abort(400, 'Not Found - undefined format')
 
         engine = search_engine
-        if engine not in ('google', 'bing', 'duckduckgo', 'yahoo', 'ask',
-                          'yandex', 'ubaidu', 'exalead', 'quora', 'tyoutube',
-                          'parsijoo', 'mojeek'):
-            err = [404, 'Incorrect search engine', qformat]
+        if engine not in scrapers:
+            err = [404, 'Incorrect search engine', engine]
             return bad_request(err)
 
         query = request.args.get('query')
@@ -50,7 +56,7 @@ def search(search_engine):
             err = [400, 'Not Found - missing query', qformat]
             return bad_request(err)
 
-        result = feedgen(query, engine[0], count)
+        result = feedgen(query, engine, count)
         if not result:
             err = [404, 'No response', qformat]
             return bad_request(err)
@@ -59,26 +65,24 @@ def search(search_engine):
             db['queries'].insert(
                 {"query": query, "engine": engine, "qformat": qformat})
 
-        for line in result:
-            line['link'] = line['link'].encode('utf-8')
-            line['title'] = line['title'].encode('utf-8')
-            if engine in ['b', 'a']:
-                line['desc'] = line['desc'].encode('utf-8')
+        try:
+            unicode  # unicode is undefined in Python 3 so NameError is raised
+            for line in result:
+                line['link'] = line['link'].encode('utf-8')
+                line['title'] = line['title'].encode('utf-8')
+                if 'desc' in line:
+                    line['desc'] = line['desc'].encode('utf-8')
+        except NameError:
+            pass  # Python 3 strings are already Unicode
 
         if qformat == 'json':
-            jsonfeed = json.dumps(result).encode('utf-8')
-            return Response(jsonfeed, mimetype='application/json')
-        xmlfeed = parseString(
-            (dicttoxml(
-                result,
-                custom_root='channel',
-                attr_type=False))).toprettyxml()
+            return jsonify(result)
+        xmlfeed = dicttoxml(result, custom_root='channel', attr_type=False)
+        xmlfeed = parseString(xmlfeed).toprettyxml()
         return Response(xmlfeed, mimetype='application/xml')
-
     except Exception as e:
         print(e)
-        return Response(json.dumps(errorObj).encode(
-            'utf-8'), mimetype='application/json')
+        return jsonify(errorObj)
 
 
 @app.after_request
@@ -88,10 +92,5 @@ def set_header(r):
 
 
 if __name__ == '__main__':
-    app.run(
-        host='0.0.0.0',
-        port=int(
-            os.environ.get(
-                'PORT',
-                7001)),
-        debug=True)
+    port = int(os.environ.get('PORT', 7001))
+    app.run(host='0.0.0.0', port=port, debug=args.dev)
